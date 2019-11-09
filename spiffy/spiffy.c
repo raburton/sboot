@@ -117,7 +117,7 @@ int my_spiffs_mount(u32_t msize) {
   cfg.phys_addr = 0;
 
   cfg.phys_erase_block = SPI_FLASH_SEC_SIZE;
-  cfg.log_block_size = SPI_FLASH_SEC_SIZE * 2;
+  cfg.log_block_size = SPI_FLASH_SEC_SIZE;
   cfg.log_page_size = LOG_PAGE_SIZE;
 
   cfg.hal_read_f = my_spiffs_read;
@@ -133,6 +133,20 @@ int my_spiffs_mount(u32_t msize) {
 		  sizeof(spiffs_cache_buf),
 		  0);
   S_DBG("Mount result: %d.\n", res);
+
+  if (res < SPIFFS_OK) {
+	  res = SPIFFS_format(&fs);
+	  S_DBG("Format result: %d.\n", res);
+	  res = SPIFFS_mount(&fs,
+		  &cfg,
+		  spiffs_work_buf,
+		  spiffs_fds,
+		  sizeof(spiffs_fds),
+		  spiffs_cache_buf,
+		  sizeof(spiffs_cache_buf),
+		  0);
+	  S_DBG("Mount result: %d.\n", res);
+  }
 
   if (res < SPIFFS_OK) {
 	  printf("Failed to mount spiffs, error %d.\n", res);
@@ -161,8 +175,8 @@ int write_to_spiffs(char *fname, u8_t *data, int size) {
 	}
 
 	if (fd >= 0) {
-		SPIFFS_close(&fs, fd);
-		S_DBG("Closed spiffs file '%s'.\n", fname);
+		int res = SPIFFS_close(&fs, fd);
+		S_DBG("Closed spiffs file '%s', res %d.\n", fname, res);
 	}
 	return ret;
 }
@@ -285,6 +299,8 @@ int main(int argc, char **argv) {
 				unlink(romfile);
 				exit(EXIT_FAILURE);
 			}
+			SPIFFS_unmount(&fs);
+			fflush(rom);
 		}
 	}
 

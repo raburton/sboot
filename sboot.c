@@ -17,8 +17,8 @@
 
 #define LOG_PAGE_SIZE 256
 
-static u8_t spiffs_work_buf[LOG_PAGE_SIZE*2];
 static u8_t spiffs_fds[32*4];
+static u8_t spiffs_work_buf[LOG_PAGE_SIZE*2];
 static u8_t spiffs_cache_buf[(LOG_PAGE_SIZE+32)*4];
 
 static spiffs fs;
@@ -27,10 +27,10 @@ static int32_t my_spi_read(uint32_t addr, uint32_t size, uint8_t *dst) {
 
 	uint32_t aligned = addr & ~3;
 	if (addr > aligned) {
-		uint32_t c = MIN(addr-aligned, size);
+		uint32_t c = MIN(4-(addr-aligned), size);
 		uint8_t buff[4];
 		SPIRead(aligned, buff, sizeof(buff));
-		ets_memcpy(dst, buff+4-c, c);
+		ets_memcpy(dst, buff+sizeof(buff)-c, c);
 		addr += c;
 		size -= c;
 		dst += c;
@@ -169,9 +169,9 @@ static uint32_t flash_write_end(flash_write_status *status) {
 
 uint32_t get_source(void *cb_data) {
 	decomp_data *decomp = (decomp_data *)cb_data;
-	uint32_t len = SPIFFS_read(&fs, decomp->fd, decomp->source, sizeof(decomp->source));
+	int32_t len = SPIFFS_read(&fs, decomp->fd, decomp->source, sizeof(decomp->source));
 	if (len <= 0) {
-		ets_printf("spiffs read errno %x\n", SPIFFS_errno(&fs));
+		ets_printf("spiffs read error %d\n", len);
 		return 0;
 	}
 	return len;
@@ -200,27 +200,28 @@ static uint32_t perform_update(partition_info *parts) {
 	uint32_t ret = FALSE;
 	decomp_data decomp;
 
-	ets_printf("Installing new rom...\n");
+	ets_printf("Testing new rom... ");
 	// open ota file
 	decomp.fd = SPIFFS_open(&fs, BOOT_OTA_FILE, SPIFFS_RDONLY, 0);
 	if (decomp.fd < 0) {
-		ets_printf("spiffs open errno %x\n", SPIFFS_errno(&fs));
+		ets_printf("spiffs open error %d\n", decomp.fd);
 	} else {
 		// dry run to check file decompresses ok
 		decomp.dry_run = 1;
 		uint32_t res = uzlib_inflate(get_source, put_bytes, &decomp, decomp.source);
 		if (res == UZLIB_DONE) {
 			// real extraction run
+			ets_printf("passed.\nInstalling new rom... ");
 			flash_write_init(&decomp.flasher, parts->boot_offset);
 			SPIFFS_lseek(&fs, decomp.fd, 0, SPIFFS_SEEK_SET);
 			decomp.dry_run = 0;
 			uzlib_inflate(get_source, put_bytes, &decomp, decomp.source);
 			flash_write_end(&decomp.flasher);
-			ets_printf("Installed new rom.\n");
+			ets_printf("complete.\n");
 			ret = TRUE;
-		} else if (res == UZLIB_CHKSUM_ERROR) ets_printf("Decompression failed: bad checksum\n");
-		else if (res == UZLIB_LENGTH_ERROR) ets_printf("Decompression failed: bad length\n");
-		else ets_printf("Decompression failed: 0x%0x\n", res);
+		} else if (res == UZLIB_CHKSUM_ERROR) ets_printf("failed: bad checksum.\n");
+		else if (res == UZLIB_LENGTH_ERROR) ets_printf("failed: bad length.\n");
+		else ets_printf("failed: 0x%0x\n", res);
 		// close ota file
 		SPIFFS_close(&fs, decomp.fd);
 	}
@@ -231,7 +232,7 @@ static uint32_t perform_update(partition_info *parts) {
 // returns true if ota file exists and it differs from installed image
 static uint32_t need_update(partition_info *parts) {
 	uint32_t ret = FALSE;
-	uint32_t addr = parts->boot_offset;
+	uint32_t addr;
 	uint32_t read_len;
 	uint8_t buffer[SECTOR_SIZE];
 	uint32_t ota_len;
@@ -239,40 +240,46 @@ static uint32_t need_update(partition_info *parts) {
 	uint32_t rom_crc = 0xffffffff;
 	spiffs_file fd;
 
+	ets_printf("Checking spiffs for update file... ");
+
 	// open ota file
 	fd = SPIFFS_open(&fs, BOOT_OTA_FILE, SPIFFS_RDONLY, 0);
 	if (fd < 0) {
-		if (fd == SPIFFS_ERR_NOT_FOUND) ets_printf("No ota file in spiffs.\n");
-		else ets_printf("spiffs open errno %x\n", SPIFFS_errno(&fs));
-		return FALSE;
-	}
-
-	// read gzip footer (crc & size)
-	if (SPIFFS_lseek(&fs, fd, -8, SPIFFS_SEEK_END) >= 0) {
-		if (SPIFFS_read(&fs, fd, (u8_t *)buffer, 8) == 8) {
-			ota_crc = buffer[0] | (buffer[1]<<8) | (buffer[2]<<16) | (buffer[3]<<24);
-			ota_len = buffer[4] | (buffer[5]<<8) | (buffer[6]<<16) | (buffer[7]<<24);
-
-			// crc the installed image
-			read_len = (ota_len & 3) ? (ota_len | 3) + 1 : ota_len;
-			while (read_len > 0) {
-				uint32_t read_next = MIN(sizeof(buffer), read_len);
-				SPIRead(addr, buffer, read_next);
-				rom_crc = uzlib_crc32(buffer, MIN(read_next, ota_len), rom_crc);
-				read_len -= read_next;
-				ota_len -= read_next;
-			}
-			rom_crc ^= 0xffffffff;
-			ret = (ota_crc != rom_crc);
-		} else {
-			ets_printf("spiffs read errno %x\n", SPIFFS_errno(&fs));
-		}
+		if (fd == SPIFFS_ERR_NOT_FOUND) ets_printf("not found.\n");
+		else ets_printf("spiffs open error %d\n", fd);
 	} else {
-		ets_printf("spiffs lseek errno %x\n", SPIFFS_errno(&fs));
-	}
+		ets_printf("found.\nChecking existing rom... ");
+		// read gzip footer (crc & size)
+		if (SPIFFS_lseek(&fs, fd, -8, SPIFFS_SEEK_END) >= 0) {
+			if (SPIFFS_read(&fs, fd, (u8_t *)buffer, 8) == 8) {
+				ota_crc = buffer[0] | (buffer[1]<<8) | (buffer[2]<<16) | (buffer[3]<<24);
+				ota_len = buffer[4] | (buffer[5]<<8) | (buffer[6]<<16) | (buffer[7]<<24);
 
-	// close ota file
-	SPIFFS_close(&fs, fd);
+				// crc the installed image
+				addr = parts->boot_offset;
+				read_len = (ota_len & 3) ? (ota_len | 3) + 1 : ota_len;
+				while (read_len > 0) {
+					uint32_t read_next = MIN(sizeof(buffer), read_len);
+					SPIRead(addr, buffer, read_next);
+					rom_crc = uzlib_crc32(buffer, MIN(read_next, ota_len), rom_crc);
+					addr += read_next;
+					read_len -= read_next;
+					ota_len -= read_next;
+				}
+				rom_crc ^= 0xffffffff;
+				ret = (ota_crc != rom_crc);
+				if (ret) ets_printf("update needed.\n");
+				else  ets_printf("update not needed.\n");
+			} else {
+				ets_printf("spiffs read error %d\n", SPIFFS_errno(&fs));
+			}
+		} else {
+			ets_printf("spiffs lseek error %d\n", SPIFFS_errno(&fs));
+		}
+
+		// close ota file
+		SPIFFS_close(&fs, fd);
+	}
 
 	return ret;
 }
@@ -385,7 +392,7 @@ uint32_t NOINLINE real_main(void) {
 	// get partition info
 	get_partitions(&parts);
 	// mount the fs
-	uint32_t res = my_spiffs_mount(&parts);
+	int32_t res = my_spiffs_mount(&parts);
 	if (res >= 0) {
 #if BOOT_LIST_DIRECTORY
 		// list contents of spiffs
@@ -396,12 +403,13 @@ uint32_t NOINLINE real_main(void) {
 		// unmount the fs
 		SPIFFS_unmount(&fs);
 	} else {
-		ets_printf("spiffs mount error: 0x%x\n", res);
+		ets_printf("spiffs mount error: %d\n", res);
 	}
 
 	// check rom image
 	loadAddr = check_image(BOOT_IMAGE_OFFSET);
-	ets_printf("Booting rom at 0x%08x\n", loadAddr);
+	if (loadAddr == 0) ets_printf("No bootable rom found at 0x%08x.\n", parts.boot_offset);
+	else ets_printf("Booting rom at 0x%08x.\n", loadAddr);
 	// copy the loader to top of iram
 	ets_memcpy((void*)_text_addr, _text_data, _text_len);
 	// return address to load from

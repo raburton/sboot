@@ -108,7 +108,7 @@ typedef struct {
   int32_t  bType;
   int32_t  bFinal;
   uint32_t curLen;
-  uint32_t destSize;
+  uint32_t dest_len;
   uint32_t checksum;
 } UZLIB_DATA;
 
@@ -149,7 +149,7 @@ static void push_bytes(UZLIB_DATA *d) {
 	// update checksum
 	d->checksum = uzlib_crc32(d->decomp_buffer, d->decomp_pos, d->checksum);
 	// update length
-	d->destSize += d->decomp_pos;
+	d->dest_len += d->decomp_pos;
 	// circle back to start
 	d->decomp_pos = 0;
 }
@@ -163,7 +163,7 @@ static void put_byte(UZLIB_DATA *d, uint8_t data) {
 }
 
 static uint8_t recall_byte(UZLIB_DATA *d, uint32_t offset) {
-	if (offset < d->decomp_pos) {
+	if (offset <= d->decomp_pos) {
 		//ets_printf("recall1 0x%08x from 0x%08x (0x%08x), 0x%02x (%c)\n", offset, decomp_pos, decomp_pos-offset, decomp_buffer[decomp_pos-offset], decomp_buffer[decomp_pos-offset]);
 		return d->decomp_buffer[d->decomp_pos-offset];
 	} else {
@@ -624,14 +624,16 @@ int32_t uzlib_inflate (
 
   int32_t res;
 
-  /* initialize decompression structure */
-  UZLIB_DATA d;
+  // decompression structure - includes a large output buffer so must be declared
+  // static, or the memory doesn't get allocated properly!
+  static UZLIB_DATA d;
 
+  // initialize decompression structure
   d.bitcount    = 0;
   d.bFinal      = 0;
   d.bType       = -1;
   d.curLen      = 0;
-  d.destSize    = 0;
+  d.dest_len    = 0;
   d.get_bytes   = get_bytes;
   d.put_bytes   = put_bytes;
   d.cb_data	    = cb_data;
@@ -641,16 +643,13 @@ int32_t uzlib_inflate (
   d.decomp_pos  = 0;
   d.checksum    = 0xffffffff;
 
-  /* create RAM copy of clcidx byte array */
+  // create RAM copy of clcidx byte array
   ets_memcpy(d.clcidx, CLCIDX_INIT, sizeof(d.clcidx));
 
-  uint32_t checksum;
-  uint32_t length;
-
-  /* build extra bits and base tables */
+  // build extra bits and base tables
   build_bits_base(d.lengthBits, d.lengthBase, 4, 3);
   build_bits_base(d.distBits, d.distBase, 2, 1);
-  d.lengthBits[28] = 0;              /* fix a special case */
+  d.lengthBits[28] = 0;              // fix a special case
   d.lengthBase[28] = 258;
 
   // do the decompression
@@ -664,8 +663,15 @@ int32_t uzlib_inflate (
   // check checksum and length
   d.checksum ^= 0xffffffff;
   if (get_le_uint32(&d) != d.checksum) return UZLIB_CHKSUM_ERROR;
-  if (get_le_uint32(&d) != d.destSize) return UZLIB_LENGTH_ERROR;
+  if (get_le_uint32(&d) != d.dest_len) return UZLIB_LENGTH_ERROR;
+  /*uint32_t checksum = get_le_uint32(&d);
+  uint32_t length =  get_le_uint32(&d);
+  ets_printf("crc in file 0x%08x, calculated 0x%08x\n", checksum, d.checksum);
+  ets_printf("len in file 0x%08x, calculated 0x%08x\n", length, d.dest_len);
+  if (checksum != d.checksum) return UZLIB_CHKSUM_ERROR;
+  if (length != d.dest_len) return UZLIB_LENGTH_ERROR;*/
 
   return UZLIB_DONE;
   
 }
+
